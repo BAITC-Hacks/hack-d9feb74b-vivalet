@@ -11,4 +11,7 @@ describe("numbered document structure", () => {
       "2. Структура", "2.1. Состав", "а. Департамент аудита", "2022 года",
     ]))).toEqual({ level1: 2, level2: 2, level3Plus: 1, total: 5 });
   });
+  it("recognizes headings without a trailing dot but ignores four-digit years", () => {
+    expect(countNumberedStructure(chunks(["1 Общие положения", "1.1 Цель", "1.1.1 Проверка", "2022 года", "2. Структура"]))).toEqual({ level1: 2, level2: 1, level3Plus: 1, total: 4 });
+  });
 });

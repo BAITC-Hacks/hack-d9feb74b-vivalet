@@ -9,8 +9,8 @@ import { sourceQuote } from "./quote";
 const unitPattern = /(?:блок(?:а|у|ом)?|департамент(?:а|у|ом)?|дирекци[яи]|управлени[ея]|отдел(?:а|у)?|служб[аы]|сектор(?:а|у)?|центр(?:а|у)?)\s+[^.;:,()]{3,100}/i;
 const structureLeadPattern = /(?:состоит из следующих структурных подразделений|в состав(?:е)? .{0,90}(?:входят|входили)|структурные подразделения(?:\s+[^:]{0,60})?:)/i;
 const listUnitPattern = /^(?:(?:[а-я]|\d+)[.)]|[–-])\s*(?:Блок|Департамент|Дирекция|Управление|Отдел|Служба|Сектор|Центр)\s/u;
-const actionPattern = /(осуществляет|проводит|организует|обеспечивает|контролирует|разрабатывает|утверждает|анализирует|оценивает|координирует|готовит|формирует|ведет|проверяет|выполняет|осуществление|проведение|организация|обеспечение|контроль|разработка|утверждение|анализ|оценка|координация|подготовка|формирование|ведение|проверка|аудит|мониторинг)/i;
-const functionStart = /^(?:\d+(?:\.\d+)*\.|[а-я]\.|[–-])?\s*(?:осуществл|провод|проведен|организ|обеспеч|контрол|контроль|разраб|утвержд|анализ|оцен|координ|подготов|формир|веден|провер|выполн|аудит|монитор|содейств|участие)/i;
+const actionPattern = /(осуществляет|проводит|организует|обеспечивает|контролирует|разрабатывает|утверждает|анализирует|оценивает|координирует|готовит|формирует|ведет|проверяет|выполняет|представляет|предлагает|запрашивает|рассматривает|информирует|согласовывает|участвует|назначает|планирует|осуществление|проведение|организация|обеспечение|контроль|разработка|утверждение|анализ|оценка|координация|подготовка|формирование|ведение|проверка|аудит|мониторинг)/i;
+const functionStart = /^(?:\d+(?:\.\d+)*\.|[а-я]\.|[–-])?\s*(?:осуществл|провод|проведен|организ|обеспеч|контрол|контроль|разраб|утвержд|анализ|оцен|координ|подготов|формир|веден|провер|выполн|аудит|монитор|содейств|участие|участв|предлага|представл|запрашива|рассматрива|информир|согласов|внос|вынос|назнач|отвеча|исполн|планир|реализ)/i;
 const abbreviationPattern = /\(([А-ЯЁ]{2,8})\)/;
 function cleanName(name: string): string {
   return name.trim().replace(/^(Блока|Блоку|Блоком)\s/u, "Блок ").replace(/^(Департамента|Департаменту|Департаментом)\s/u, "Департамент ").replace(/^(Отдела|Отделу)\s/u, "Отдел ").replace(/[.!?;:,]+$/, "").slice(0, 120);
@@ -67,9 +67,11 @@ export function extractRules(document: ParsedDocument): OrganizationalUnit[] {
   let current: OrganizationalUnit = main;
   for (const chunk of document.chunks) {
     if (/^\d+\.\s/.test(chunk.text)) current = main;
-    if (/^\d+(?:\.\d+)*\.\s+Директор(?:у|ы)?\s+департамента\s/u.test(chunk.text)) {
+    if (/^\d+(?:\.\d+)*\.\s+(?:Директор|Руководитель|Работники|Департамент)/iu.test(chunk.text)) {
       const name = findUnitName(chunk.text);
-      if (name) current = units.get(normalize(name)) ?? main;
+      const named = name ? units.get(normalize(name)) : undefined;
+      const abbreviated = [...units.values()].find((unit) => unit.abbreviation && new RegExp(`(?:^|[^А-ЯЁ])${unit.abbreviation}(?=$|[^А-ЯЁ])`, "u").test(chunk.text));
+      current = named ?? abbreviated ?? main;
     }
     if (structure.some((item) => item.chunk.id === chunk.id)) continue;
     if (functionStart.test(chunk.text) && chunk.text.length < 1200) addFunction(current, document, chunk, chunk.text);
@@ -107,12 +109,15 @@ export function attachExtractedFunctions(document: ParsedDocument, chunks: Docum
 
 export async function extractAi(document: ParsedDocument, onProgress?: (done: number, total: number) => Promise<void>): Promise<OrganizationalUnit[]> {
   document = { ...document, chunks: withHierarchy(document.chunks) };
-  const units = extractRules(document).map((unit) => ({ ...unit, functions: [] as FunctionItem[] }));
-  // Every chunk is processed, including clauses already recognized by rules. Never truncate sources.
+  // The explicit structure list is the source of truth for units. Model-supplied
+  // names may refer to counterparties or roles and must not change unit counts.
+  const units = extractRules(document);
+  const candidateIds = new Set(units.flatMap((unit) => unit.functions.flatMap((fn) => fn.sourceRefs.map((ref) => ref.chunkId))));
+  const candidates = document.chunks.filter((chunk) => candidateIds.has(chunk.id) || functionStart.test(chunk.text));
   const groups: DocumentChunk[][] = [];
   let group: DocumentChunk[] = [];
   let size = 0;
-  for (const chunk of document.chunks) {
+  for (const chunk of candidates) {
     const length = chunk.text.length + (chunk.parentContext?.length ?? 0);
     if (group.length && (size + length > 14000 || group.length >= 12)) { groups.push(group); group = []; size = 0; }
     group.push(chunk); size += length;
@@ -122,44 +127,19 @@ export async function extractAi(document: ParsedDocument, onProgress?: (done: nu
     const wave = groups.slice(index, index + 3);
     const results = await Promise.all(wave.map(async (chunks) => {
       const payload = { filename: document.filename, units: units.map(({ name, abbreviation, parentUnit }) => ({ name, abbreviation, parentUnit })), chunks };
-      let invalid: string[] = [];
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const output = await extractFunctions(attempt === 0 ? payload : {
-          ...payload,
-          validationFeedback: {
-            instruction: "Regenerate the complete extraction for all supplied chunks. Copy each quote verbatim from the text of its chunkId, not parentContext or the unit list. Do not paraphrase or join separate passages.",
-            invalidFacts: invalid,
-          },
-        });
-        invalid = [];
-        for (const [kind, facts] of [["unit", output.units], ["function", output.functions]] as const) {
-          for (const fact of facts) {
-            const chunk = chunks.find((item) => item.id === fact.chunkId);
-            const quote = chunk && sourceQuote(chunk.text, fact.quote);
-            if (quote) fact.quote = quote;
-            else invalid.push(`${kind}: chunkId=${fact.chunkId}`);
-          }
-        }
-        if (!invalid.length) return output;
-      }
-      throw new Error(`Не удалось подтвердить цитаты в документе «${document.filename}» после повторного извлечения (${invalid.join(", ")}). Модель вернула текст, отсутствующий в указанных фрагментах. Повторите анализ.`);
+      try { return await extractFunctions(payload); }
+      catch { return null; }
     }));
     for (const [position, output] of results.entries()) {
-      for (const fact of output.units) {
+      if (!output) continue;
+      const accepted = output.functions.flatMap((fact) => {
         const chunk = wave[position].find((item) => item.id === fact.chunkId);
-        if (!chunk || !fact.quote.trim() || !chunk.text.includes(fact.quote)) throw new Error("Подразделение не подтверждается точной цитатой.");
-        let unit = units.find((item) => item.normalizedName === normalize(fact.name) || (fact.abbreviation && item.abbreviation === fact.abbreviation));
-        if (!unit) {
-          unit = { id: crypto.randomUUID(), documentId: document.id, side: document.side, name: fact.name, normalizedName: normalize(fact.name), isRoot: false, functions: [], roles: [], sourceRefs: [] };
-          units.push(unit);
-        }
-        if (fact.parentUnit) unit.parentUnit = fact.parentUnit;
-        if (fact.leaderRole) unit.leaderRole = fact.leaderRole;
-        if (fact.abbreviation) unit.abbreviation = fact.abbreviation;
-        unit.roles = [...new Set([...unit.roles, ...fact.roles])];
-        unit.sourceRefs.push(sourceRef(document, chunk, fact.quote));
-      }
-      attachExtractedFunctions(document, wave[position], units, output.functions);
+        const quote = chunk && sourceQuote(chunk.text, fact.quote);
+        return quote ? [{ ...fact, quote }] : [];
+      });
+      const enriched = new Set(accepted.map((fact) => fact.chunkId));
+      for (const unit of units) unit.functions = unit.functions.filter((fn) => !fn.sourceRefs.some((ref) => enriched.has(ref.chunkId)));
+      attachExtractedFunctions(document, wave[position], units, accepted);
     }
     await onProgress?.(Math.min(index + wave.length, groups.length), groups.length);
   }

@@ -33,14 +33,16 @@ export async function analyzeDocuments(documents: ParsedDocument[], mode: Analys
   const organizationGraph = buildOrganizationGraph(units);
   let report = fallback;
   if (mode === "ai" && verified.length) {
-    const proposed = await synthesize({ verifiedChanges: verified, organization: units.map(({ name, side, parentUnit, roles }) => ({ name, side, parentUnit, roles })), unresolvedCount: needsReview.length, counts: fallback });
-    const check = await critique({ claim: proposed, verifiedChanges: verified, instruction: "Verify EVERY report assertion and citation against verifiedChanges. Reject new unsupported organizational interpretations. Return exact supporting quotes." });
-    const evidenceValid = check.evidence.length > 0 && check.evidence.every((ref) => {
-      const document = documents.find((d) => d.id === ref.documentId);
-      const chunk = document?.chunks.find((c) => c.id === ref.chunkId);
-      return document && chunk && validRef(sourceRef(document, chunk, ref.quote), documents) && verified.some((change) => [...change.beforeRefs, ...change.afterRefs].some((r) => r.chunkId === ref.chunkId));
-    });
-    if (check.status === "SUPPORTED" && evidenceValid) report = proposed;
+    try {
+      const proposed = await synthesize({ verifiedChanges: verified, organization: units.map(({ name, side, parentUnit, roles }) => ({ name, side, parentUnit, roles })), unresolvedCount: needsReview.length, counts: fallback });
+      const check = await critique({ claim: proposed, verifiedChanges: verified, instruction: "Verify EVERY report assertion and citation against verifiedChanges. Reject new unsupported organizational interpretations. Return exact supporting quotes." });
+      const evidenceValid = check.evidence.length > 0 && check.evidence.every((ref) => {
+        const document = documents.find((d) => d.id === ref.documentId);
+        const chunk = document?.chunks.find((c) => c.id === ref.chunkId);
+        return document && chunk && validRef(sourceRef(document, chunk, ref.quote), documents) && verified.some((change) => [...change.beforeRefs, ...change.afterRefs].some((r) => r.chunkId === ref.chunkId));
+      });
+      if (check.status === "SUPPORTED" && evidenceValid) report = proposed;
+    } catch { /* The source-based summary remains available when report generation fails. */ }
   }
   return { mode, units, unitMappings, semanticChanges, organizationGraph, functionMatches: semanticChanges.map((change) => changeToMatch(change, units)), findings, needsReview, report };
 }

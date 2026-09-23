@@ -66,5 +66,11 @@ describe("matching and evidence", () => {
     const mappings = mapUnits([beforeUnit], [afterUnit]);
     expect(mappings.some((m) => m.beforeUnitIds.includes("b1") && m.afterUnitIds.includes("a1"))).toBe(true);
   });
+  it("records every predecessor when two units merge", () => {
+    const makeUnit = (id: string, side: "before" | "after"): OrganizationalUnit => ({ id, documentId: id, side, name: "Департамент аудита", normalizedName: normalize("Департамент аудита"), roles: [], functions: [], sourceRefs: [] });
+    const mappings = mapUnits([makeUnit("b1", "before"), makeUnit("b2", "before")], [makeUnit("a1", "after")]);
+    expect(mappings).toHaveLength(1);
+    expect(mappings[0].transformation).toBe("merged");
+    expect(mappings[0].beforeUnitIds).toEqual(["b1", "b2"]);
+  });
 });
-

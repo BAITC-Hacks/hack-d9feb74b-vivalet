@@ -1,4 +1,5 @@
 import type { DocumentChunk } from "../types";
+import { leadingNumber } from "./sections";
 
 /** Preserve exact text and locations. Context follows numbering, including across PDF pages. */
 export function withHierarchy(chunks: DocumentChunk[]): DocumentChunk[] {
@@ -6,7 +7,7 @@ export function withHierarchy(chunks: DocumentChunk[]): DocumentChunk[] {
   let sheet: string | undefined;
   return chunks.map((chunk) => {
     if (chunk.sheet !== sheet) { stack = []; sheet = chunk.sheet; }
-    const number = chunk.text.trim().match(/^(\d+(?:\.\d+)*)(?:\.(?=\s|[А-ЯЁ])|\s)/u)?.[1];
+    const number = leadingNumber(chunk.text);
     if (number) stack = stack.filter((parent) => number.startsWith(`${parent.number}.`));
     const parents = [...stack];
     const actor = [...parents].reverse().find(({ chunk: parent }) => /(?:директор|руководител|аудитор|департамент|отдел|служб)/i.test(parent.text));

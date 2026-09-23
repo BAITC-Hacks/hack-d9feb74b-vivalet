@@ -17,11 +17,11 @@ const docs = (): ParsedDocument[] => (["before", "after"] as const).map((side) =
 beforeEach(() => vi.clearAllMocks());
 
 describe("semantic pipeline acceptance contracts (model responses are controlled)", () => {
-  it("rewording: always calls the semantic matcher even for identical wording", async () => {
+  it("identical function, actor and authority bypass the semantic matcher", async () => {
     const matcher = vi.fn(async () => decision(["b"], ["a"]));
     const changes = await compareFunctions(units([fn("b")], [fn("a")]), "ai", undefined, matcher, { before: [], after: [] });
-    expect(matcher).toHaveBeenCalledOnce();
-    expect(changes[0].changeTypes).toEqual(["REWORDING"]);
+    expect(matcher).not.toHaveBeenCalled();
+    expect(changes[0].changeTypes).toEqual(["UNCHANGED"]);
     expect(changes[0].meaningPreserved).toBe(true);
   });
   it("transfer: changed actor cannot become removal plus addition", async () => {
@@ -43,18 +43,18 @@ describe("semantic pipeline acceptance contracts (model responses are controlled
     const expanded = finalizeDecision(decision(["b"], ["a"], { newCoveredByOld: false, scopeChanged: true }), [fn("b")], [fn("a")], ["a"], ["a"], config);
     expect(expanded.changeTypes).toContain("EXPANDED");
   });
-  it("possible loss: scans every new function and keeps an evidence review requirement", async () => {
-    const after = Array.from({ length: 8 }, (_, i) => fn(`a${i}`));
+  it("possible loss stays provisional when only a candidate shortlist was searched", async () => {
+    const after = Array.from({ length: 15 }, (_, i) => fn(`a${i}`, "Директор", `Новая функция ${i}`));
     const matcher = vi.fn(async ({ before }: { before: FunctionItem[] }) => decision(before.map((f) => f.id), [], { meaningPreserved: false, oldCoveredByNew: false, newCoveredByOld: false, coverageScore: 0 }));
     const changes = await compareFunctions(units([fn("b")], after), "ai", undefined, matcher, { before: [], after: [] });
     const gap = changes.find((change) => change.oldFunctionIds.includes("b"))!;
     expect(gap.changeTypes).toEqual(["POTENTIAL_GAP"]);
-    expect(gap.searchedAfterIds).toHaveLength(8);
-    expect(gap.globalSearchComplete).toBe(true);
+    expect(gap.searchedAfterIds).toHaveLength(12);
+    expect(gap.globalSearchComplete).toBe(false);
     expect(gap.requiresHumanReview).toBe(true);
   });
-  it("recovers an equivalent outside the top five instead of reporting a gap", async () => {
-    const after = Array.from({ length: 6 }, (_, i) => fn(`a${i}`));
+  it("includes an equivalent outside the first five in one model request", async () => {
+    const after = Array.from({ length: 6 }, (_, i) => fn(`a${i}`, "Директор", `Новая функция ${i}`));
     const changes = await compareFunctions(units([fn("b")], after), "ai", undefined, async ({ before, candidates }) => decision(before.map((fn) => fn.id), candidates.some((fn) => fn.id === "a5") ? ["a5"] : [], { actorChanged: true }), { before: [], after: [] });
     const recovered = changes.find((change) => change.oldFunctionIds.includes("b"))!;
     expect(recovered.newFunctionIds).toEqual(["a5"]);
@@ -78,7 +78,7 @@ describe("semantic pipeline acceptance contracts (model responses are controlled
   });
   it("merge: reconciles shared targets in a separate semantic decision", async () => {
     const matcher = vi.fn(async ({ before }: { before: FunctionItem[] }) => decision(before.map((fn) => fn.id), ["a"]));
-    const changes = await compareFunctions(units([fn("b1"), fn("b2")], [fn("a")]), "ai", undefined, matcher, { before: [], after: [] });
+    const changes = await compareFunctions(units([fn("b1", "Директор", "Старая функция 1"), fn("b2", "Директор", "Старая функция 2")], [fn("a")]), "ai", undefined, matcher, { before: [], after: [] });
     expect(changes).toHaveLength(1);
     expect(changes[0].oldFunctionIds).toEqual(["b1", "b2"]);
     expect(changes[0].changeTypes).toContain("MERGED");

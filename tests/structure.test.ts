@@ -17,6 +17,7 @@ describe("sample organizational structure", () => {
       const units = extractRules(document);
       const children = units.filter((unit) => !unit.isRoot);
       expect(children).toHaveLength(fixture.expected);
+      expect(children.flatMap((unit) => unit.functions).length).toBeGreaterThan(0);
       expect(children.every((unit) => unit.sourceRefs[0].quote.includes("Департамент"))).toBe(true);
       expect(units.some((unit) => unit.name.includes("Управление рисками организаций"))).toBe(false);
       expect(units.find((unit) => unit.isRoot)?.name).toMatch(/Блок внутреннего аудита/);

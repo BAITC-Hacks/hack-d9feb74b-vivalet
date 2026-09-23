@@ -8,10 +8,13 @@ export interface NumberedStructure {
 }
 
 /** Counts unique explicit numbers at the start of a fragment; repeated table-of-contents entries count once. */
+export function leadingNumber(text: string): string | undefined {
+  return text.trim().match(/^(\d{1,3}(?:\.\d+)*)(?:\.(?=\s|$|[А-ЯЁа-яё])|\s+(?=[А-ЯЁа-яё]))/u)?.[1];
+}
 export function countNumberedStructure(chunks: DocumentChunk[]): NumberedStructure {
   const numbers = new Set<string>();
   for (const chunk of chunks) {
-    const number = chunk.text.trim().match(/^(\d+(?:\.\d+)*)\.(?=\s|[А-ЯЁ])/u)?.[1];
+    const number = leadingNumber(chunk.text);
     if (number) numbers.add(number);
   }
   const levels = [...numbers].map((number) => number.split(".").length);

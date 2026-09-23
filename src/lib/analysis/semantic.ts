@@ -1,8 +1,8 @@
 import { critique, embed, matchFunctions } from "../ai/client";
-import type { FunctionItem, OrganizationalUnit, ParsedDocument, SemanticChange, SemanticDecision, SourceReference, Verification } from "../types";
+import type { FunctionItem, OrganizationalUnit, ParsedDocument, SemanticChange, SemanticDecision, SourceReference } from "../types";
 import { sourceRef } from "../documents";
 import { validRef } from "./evidence";
-import { cosine, functionSimilarity, similarity } from "./matching";
+import { cosine, functionSimilarity, normalize, similarity } from "./matching";
 
 export type Matcher = (payload: { before: FunctionItem[]; candidates: FunctionItem[]; organization: unknown }) => Promise<SemanticDecision>;
 export interface SemanticConfig { topCandidates: number; reviewConfidence: number; preservedCoverage: number; partialCoverage: number; }
@@ -65,37 +65,48 @@ export async function compareFunctions(units: OrganizationalUnit[], mode: "ai" |
   const after = units.filter((u) => u.side === "after").flatMap((u) => u.functions);
   const organization = units.map(({ id, name, side, parentUnit, roles }) => ({ id, name, side, parentUnit, roles }));
   const config = semanticConfig();
-  const embeddings = vectors ?? (mode === "ai" ? { before: await embed(before.map(semanticText)), after: await embed(after.map(semanticText)) } : { before: [], after: [] });
+  let embeddings: { before: number[][]; after: number[][] } = vectors ?? { before: [], after: [] };
+  if (mode === "ai" && !vectors) try {
+    const [old, next] = await Promise.all([embed(before.map(semanticText)), embed(after.map(semanticText))]);
+    embeddings = { before: old, after: next };
+  } catch { embeddings = { before: [], after: [] }; }
   const changes: SemanticChange[] = [];
   const allAfterIds = after.map((fn) => fn.id);
-  for (const [index, fn] of before.entries()) {
+  const exactUsed = new Set<string>();
+  for (let offset = 0; offset < before.length; offset += 4) {
+    await Promise.all(before.slice(offset, offset + 4).map(async (fn, localIndex) => {
+    const index = offset + localIndex;
+    const exact = after.find((candidate) => !exactUsed.has(candidate.id)
+      && normalize(fn.originalText) === normalize(candidate.originalText)
+      && normalize(fn.semantic?.actor ?? "") === normalize(candidate.semantic?.actor ?? "")
+      && normalize(fn.semantic?.organizationalUnit ?? "") === normalize(candidate.semantic?.organizationalUnit ?? "")
+      && fn.semantic?.authorityType === candidate.semantic?.authorityType);
+    if (exact && mode === "ai" && fn.semantic?.actor && fn.semantic.authorityType !== "unknown") {
+      exactUsed.add(exact.id);
+      const preserved = finalizeDecision({ oldFunctionIds: [fn.id], newFunctionIds: [exact.id], changeTypes: ["UNCHANGED"], meaningPreserved: true, oldCoveredByNew: true, newCoveredByOld: true, actorChanged: false, authorityChanged: false, scopeChanged: false, conditionsChanged: false, purposeChanged: false, coverageScore: 1, confidence: .99, reasoning: "Формулировка, исполнитель и полномочие совпадают дословно.", requiresHumanReview: false }, [fn], [exact], [exact.id], allAfterIds, config);
+      preserved.verification = { status: "SUPPORTED", reason: "Совпали точный текст, исполнитель и тип полномочия.", evidence: [...preserved.beforeRefs, ...preserved.afterRefs] };
+      changes.push(preserved);
+      return;
+    }
     const ranked = rankCandidates(fn, after, embeddings.before[index], embeddings.after);
     if (mode === "rules") {
       const candidate = ranked[0];
       const related = candidate && functionSimilarity(fn, candidate) >= .52;
       changes.push(finalizeDecision({ oldFunctionIds: [fn.id], newFunctionIds: related ? [candidate.id] : [], changeTypes: [], meaningPreserved: false, oldCoveredByNew: false, newCoveredByOld: false, actorChanged: related ? fn.semantic?.actor !== candidate.semantic?.actor : false, authorityChanged: related ? fn.semantic?.authorityType !== candidate.semantic?.authorityType : false, scopeChanged: false, conditionsChanged: false, purposeChanged: false, coverageScore: 0, confidence: .4, reasoning: "Предварительный поиск по словам. Смысл, покрытие и возможная потеря требуют проверки сотрудником или запуска AI-анализа.", requiresHumanReview: true }, [fn], related ? [candidate] : [], [], allAfterIds, config));
-      continue;
+      return;
     }
-    let candidates = ranked.slice(0, config.topCandidates);
+    const candidates = ranked.slice(0, Math.max(config.topCandidates, 12));
     const searched = candidates.map((fn) => fn.id);
-    let decision = await matcher({ before: [fn], candidates, organization });
-    finalizeDecision(decision, [fn], candidates, searched, allAfterIds, config);
-    // A shortlist can never establish absence. Scan every remaining function for gaps and partial coverage.
-    if (!decision.newFunctionIds.length || !decision.oldCoveredByNew || decision.requiresHumanReview) {
-      const relevant = new Set(decision.newFunctionIds);
-      for (let offset = config.topCandidates; offset < ranked.length; offset += 20) {
-        const batch = ranked.slice(offset, offset + 20);
-        const found = await matcher({ before: [fn], candidates: batch, organization });
-        finalizeDecision(found, [fn], batch, batch.map((item) => item.id), allAfterIds, config);
-        found.newFunctionIds.forEach((id) => relevant.add(id));
-        searched.push(...batch.map((item) => item.id));
-        await onProgress?.(`Глобальная проверка функции ${index + 1}/${before.length}: ${searched.length}/${after.length}`);
-      }
-      candidates = after.filter((item) => relevant.has(item.id));
-      decision = await matcher({ before: [fn], candidates, organization });
+    try {
+      const decision = await matcher({ before: [fn], candidates, organization });
+      const change = finalizeDecision(decision, [fn], candidates, searched, allAfterIds, config);
+      if (!change.newFunctionIds.length && !change.globalSearchComplete) change.requiresHumanReview = true;
+      changes.push(change);
+    } catch {
+      changes.push(finalizeDecision({ oldFunctionIds: [fn.id], newFunctionIds: [], changeTypes: ["POTENTIAL_GAP"], meaningPreserved: false, oldCoveredByNew: false, newCoveredByOld: false, actorChanged: false, authorityChanged: false, scopeChanged: false, conditionsChanged: false, purposeChanged: false, coverageScore: 0, confidence: .3, reasoning: "Сопоставление не завершилось; требуется ручная проверка.", requiresHumanReview: true }, [fn], [], searched, allAfterIds, config));
     }
-    changes.push(finalizeDecision(decision, [fn], candidates, searched, allAfterIds, config));
     await onProgress?.(`Сопоставление подразделений и функций: ${index + 1}/${before.length}`);
+    }));
   }
   if (mode === "ai") {
     // Reconcile connected groups: shared targets may represent merging, not repeated additions.
@@ -113,87 +124,84 @@ export async function compareFunctions(units: OrganizationalUnit[], mode: "ai" |
       if (group.length === 1) { changes.push(group[0]); continue; }
       const old = before.filter((fn) => group.some((change) => change.oldFunctionIds.includes(fn.id)));
       const next = after.filter((fn) => group.some((change) => change.newFunctionIds.includes(fn.id)));
-      const decision = await matcher({ before: old, candidates: next, organization });
-      changes.push(finalizeDecision(decision, old, next, group.every((change) => change.globalSearchComplete) ? allAfterIds : [], allAfterIds, config));
+      try {
+        const decision = await matcher({ before: old, candidates: next, organization });
+        changes.push(finalizeDecision(decision, old, next, group.every((change) => change.globalSearchComplete) ? allAfterIds : [], allAfterIds, config));
+      } catch { changes.push(...group.map((change) => ({ ...change, requiresHumanReview: true }))); }
     }
   }
   for (const fn of after.filter((fn) => !changes.some((change) => change.newFunctionIds.includes(fn.id)))) {
-    // A reverse global check prevents an unselected equivalent being mislabeled as a new function.
-    let related = false;
-    if (mode === "ai") for (let index = 0; index < before.length; index += 20) {
-      const batch = before.slice(index, index + 20);
-      const reverse = await matcher({ before: [fn], candidates: batch, organization });
-      finalizeDecision(reverse, [fn], batch, batch.map((item) => item.id), before.map((item) => item.id), config);
-      if (reverse.newFunctionIds.length) related = true;
-    }
-    const change = finalizeDecision({ oldFunctionIds: [], newFunctionIds: [fn.id], changeTypes: ["ADDED"], meaningPreserved: false, oldCoveredByNew: false, newCoveredByOld: false, actorChanged: false, authorityChanged: false, scopeChanged: false, conditionsChanged: false, purposeChanged: false, coverageScore: 0, confidence: mode === "ai" && !related ? .85 : .4, reasoning: related ? "Найдено обратное соответствие старым функциям; необходимо проверить пересечение или распределение ответственности." : "Смыслового соответствия в старой редакции не найдено.", requiresHumanReview: mode === "rules" || related }, [], [fn], [], allAfterIds, config);
-    if (related) change.changeTypes = ["POTENTIAL_OVERLAP"];
+    const change = finalizeDecision({ oldFunctionIds: [], newFunctionIds: [fn.id], changeTypes: ["ADDED"], meaningPreserved: false, oldCoveredByNew: false, newCoveredByOld: false, actorChanged: false, authorityChanged: false, scopeChanged: false, conditionsChanged: false, purposeChanged: false, coverageScore: 0, confidence: .4, reasoning: "Соответствие в проверенных кандидатах не найдено; требуется проверка остальных функций старой редакции.", requiresHumanReview: true }, [], [fn], [], allAfterIds, config);
     changes.push(change);
   }
   return changes;
 }
 
 export async function verifyChanges(changes: SemanticChange[], documents: ParsedDocument[], mode: "ai" | "rules", onProgress?: (message: string) => Promise<void>): Promise<void> {
-  const afterChunks = documents.filter((d) => d.side === "after").flatMap((document) => document.chunks.map((chunk) => ({ filename: document.filename, ...chunk })));
-  for (const [index, change] of changes.entries()) {
-    const refs = [...change.beforeRefs, ...change.afterRefs];
-    if (mode === "rules" || !refs.length || refs.some((ref) => !validRef(ref, documents))) {
-      change.requiresHumanReview = true;
-      change.verification = { status: "UNCERTAIN", reason: "Не выполнена смысловая проверка или недостаточно источников.", evidence: [] };
-      continue;
-    }
-    const isGap = change.changeTypes.includes("POTENTIAL_GAP");
-    const chunks = isGap ? afterChunks : refs.flatMap((ref) => {
-      const chunk = documents.find((d) => d.id === ref.documentId)?.chunks.find((c) => c.id === ref.chunkId);
-      return chunk ? [{ ...chunk, filename: ref.filename }] : [];
-    });
-    const batches: typeof chunks[] = [];
-    let batch: typeof chunks = [], size = 0;
-    for (const chunk of chunks) {
-      if (batch.length && size + chunk.text.length > 18000) { batches.push(batch); batch = []; size = 0; }
-      batch.push(chunk); size += chunk.text.length;
-    }
-    batches.push(batch);
-    const checks: Verification[] = [];
-    for (const [batchIndex, sourceChunks] of batches.entries()) {
-      const output = await critique({ claim: change, chunks: sourceChunks, batch: batchIndex + 1, totalBatches: batches.length });
-      const evidence = output.evidence.flatMap((ref) => {
-        const document = documents.find((d) => d.id === ref.documentId);
-        const chunk = document?.chunks.find((c) => c.id === ref.chunkId);
-        return document && chunk && ref.quote.trim() && chunk.text.includes(ref.quote) ? [sourceRef(document, chunk, ref.quote)] : [];
+  let completed = 0;
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(4, changes.length) }, async () => {
+    while (cursor < changes.length) {
+      const change = changes[cursor++];
+      const refs = [...change.beforeRefs, ...change.afterRefs];
+      if (change.verification?.status === "SUPPORTED" && refs.every((ref) => validRef(ref, documents))) {
+        completed++;
+        continue;
+      }
+      const isGap = change.changeTypes.includes("POTENTIAL_GAP");
+      if (mode === "rules" || !refs.length || refs.some((ref) => !validRef(ref, documents)) || (isGap && !change.globalSearchComplete)) {
+        change.requiresHumanReview = true;
+        change.verification = { status: "UNCERTAIN", reason: isGap ? "Поиск ограничен кандидатами; отсутствие функции в новом документе не доказано." : "Не выполнена смысловая проверка или недостаточно источников.", evidence: [] };
+        completed++;
+        continue;
+      }
+      const selected = uniqueRefs([change.beforeRefs[0], change.beforeRefs.at(-1), change.afterRefs[0], change.afterRefs.at(-1)].filter((ref): ref is SourceReference => !!ref));
+      const chunks = (isGap ? documents.filter((document) => document.side === "after").flatMap((document) => document.chunks.map((chunk) => ({ documentId: document.id, chunkId: chunk.id, filename: document.filename }))) : selected).flatMap((ref) => {
+        const chunk = documents.find((document) => document.id === ref.documentId)?.chunks.find((item) => item.id === ref.chunkId);
+        return chunk ? [{ ...chunk, filename: ref.filename }] : [];
       });
-      const invalid = evidence.length !== output.evidence.length;
-      const missingBefore = change.beforeRefs.length > 0 && !evidence.some((r) => change.beforeRefs.some((b) => b.chunkId === r.chunkId));
-      const missingAfter = change.afterRefs.length > 0 && !evidence.some((r) => change.afterRefs.some((a) => a.chunkId === r.chunkId));
-      const missing = output.status !== "UNCERTAIN" && (!evidence.length || (!isGap && (missingBefore || missingAfter)));
-      checks.push({ status: invalid || missing ? "UNCERTAIN" : output.status, reason: invalid || missing ? "Проверка не предоставила достаточные точные источники. " + output.reason : output.reason, evidence });
-      await onProgress?.(`Проверка потерь, пересечений и конфликтов: ${index + 1}/${changes.length}, пакет ${batchIndex + 1}/${batches.length}`);
+      try {
+        const output = await critique({ claim: change, chunks });
+        const evidence = output.evidence.flatMap((ref) => {
+          const document = documents.find((item) => item.id === ref.documentId);
+          const chunk = document?.chunks.find((item) => item.id === ref.chunkId);
+          return document && chunk && ref.quote.trim() && chunk.text.includes(ref.quote) ? [sourceRef(document, chunk, ref.quote)] : [];
+        });
+        const supported = output.status === "SUPPORTED" && evidence.length === output.evidence.length && evidence.length > 0
+          && (!change.beforeRefs.length || evidence.some((ref) => change.beforeRefs.some((item) => item.chunkId === ref.chunkId)))
+          && (!change.afterRefs.length || evidence.some((ref) => change.afterRefs.some((item) => item.chunkId === ref.chunkId)));
+        change.verification = { status: supported ? "SUPPORTED" : output.status === "REFUTED" ? "REFUTED" : "UNCERTAIN", reason: output.reason, evidence: uniqueRefs(evidence) };
+      } catch {
+        change.verification = { status: "UNCERTAIN", reason: "Проверка источников не завершилась; требуется решение сотрудника.", evidence: [] };
+      }
+      if (change.verification.status !== "SUPPORTED") {
+        change.requiresHumanReview = true;
+        change.confidence = Math.min(change.confidence, .59);
+      }
+      completed++;
+      if (completed % 5 === 0 || completed === changes.length) await onProgress?.(`Проверка потерь, пересечений и конфликтов: ${completed}/${changes.length}`);
     }
-    const status = checks.some((c) => c.status === "REFUTED") ? "REFUTED" : checks.some((c) => c.status === "UNCERTAIN") ? "UNCERTAIN" : "SUPPORTED";
-    change.verification = { status, reason: checks.map((c) => c.reason).join("\n"), evidence: uniqueRefs(checks.flatMap((c) => c.evidence)) };
-    if (status !== "SUPPORTED" || (isGap && !change.globalSearchComplete)) {
-      change.requiresHumanReview = true; change.confidence = Math.min(change.confidence, .59);
-    }
-  }
+  }));
 }
 
 /** Retrieval proposes risk pairs; only the independent source-based critic can support them. */
 export async function findFunctionalRisks(units: OrganizationalUnit[], mode: "ai" | "rules"): Promise<SemanticChange[]> {
   const after = units.filter((u) => u.side === "after").flatMap((u) => u.functions);
-  const vectors = mode === "ai" ? await embed(after.map(semanticText)) : [];
-  const proposals: SemanticChange[] = [];
+  let vectors: number[][] = [];
+  if (mode === "ai") try { vectors = await embed(after.map(semanticText)); } catch { vectors = []; }
+  const proposals: { change: SemanticChange; score: number }[] = [];
   for (const [index, left] of after.entries()) {
     const candidates = after.slice(index + 1).map((right, offset) => ({ right, score: Math.max(functionSimilarity(left, right), vectors[index] && vectors[index + offset + 1] ? cosine(vectors[index], vectors[index + offset + 1]) : 0) }))
       .filter(({ right, score }) => score >= .65 || similarity(left.object ?? "", right.object ?? "") >= .4).sort((a, b) => b.score - a.score).slice(0, 5);
-    for (const { right } of candidates) {
+    for (const { right, score } of candidates) {
       const conflict = left.unitId === right.unitId && left.category !== right.category && [left.category, right.category].includes("oversight");
       const overlap = left.semantic?.actor !== right.semantic?.actor;
       if (!conflict && !overlap) continue;
-      proposals.push({ id: crypto.randomUUID(), oldFunctionIds: [], newFunctionIds: [left.id, right.id], changeTypes: [conflict ? "POTENTIAL_CONFLICT" : "POTENTIAL_OVERLAP"], meaningPreserved: false, oldCoveredByNew: false, newCoveredByOld: false, actorChanged: false, authorityChanged: false, scopeChanged: false, conditionsChanged: false, purposeChanged: false,
+      proposals.push({ score, change: { id: crypto.randomUUID(), oldFunctionIds: [], newFunctionIds: [left.id, right.id], changeTypes: [conflict ? "POTENTIAL_CONFLICT" : "POTENTIAL_OVERLAP"], meaningPreserved: false, oldCoveredByNew: false, newCoveredByOld: false, actorChanged: false, authorityChanged: false, scopeChanged: false, conditionsChanged: false, purposeChanged: false,
         coverageScore: 0, confidence: mode === "ai" ? .8 : .4, requiresHumanReview: mode === "rules", searchedAfterIds: [], globalSearchComplete: false,
         reasoning: conflict ? "Возможное совмещение исполнения и контроля связанной деятельности. Необходимо проверить предмет контроля и независимость." : "Возможное пересечение ответственности разных исполнителей. Необходимо отличить дублирование от дополняющих функций и разных областей действия.",
-        beforeRefs: left.sourceRefs, afterRefs: right.sourceRefs });
+        beforeRefs: left.sourceRefs, afterRefs: right.sourceRefs } });
     }
   }
-  return proposals;
+  return proposals.sort((a, b) => b.score - a.score).slice(0, 30).map(({ change }) => change);
 }

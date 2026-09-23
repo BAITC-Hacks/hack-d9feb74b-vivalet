@@ -1,10 +1,11 @@
 import mammoth from "mammoth";
 import { withHierarchy } from "./analysis/hierarchy";
+import { leadingNumber } from "./analysis/sections";
 import * as XLSX from "xlsx";
 import type { DocumentChunk, DocumentType, ParsedDocument, Side, SourceReference } from "./types";
 
 export function extractSection(text: string): string | undefined {
-  return text.trim().match(/^(\d+(?:\.\d+)*)(?:\.|\s)(?=\s|\S)/)?.[1];
+  return leadingNumber(text);
 }
 function makeChunk(documentId: string, text: string, extra: Partial<DocumentChunk> = {}): DocumentChunk {
   return { id: crypto.randomUUID(), documentId, text: text.trim(), ...extra };

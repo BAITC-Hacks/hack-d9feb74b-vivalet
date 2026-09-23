@@ -44,15 +44,17 @@ export function mapUnits(before: OrganizationalUnit[], after: OrganizationalUnit
   }
   const mappings: UnitMapping[] = []; const usedBefore = new Set<string>(); const usedAfter = new Set<string>();
   for (const a of before) {
+    if (usedBefore.has(a.id)) continue;
     const candidates = (byBefore.get(a.id) ?? []).filter((edge) => edge.score >= Math.max(0.24, (byBefore.get(a.id)?.[0]?.score ?? 0) - 0.12));
     if (!candidates.length) continue;
     const eligible = candidates.filter((edge) => !usedAfter.has(edge.b.id));
     if (!eligible.length) continue;
     const targets = eligible.slice(0, 3);
-    const merge = targets.length === 1 && (byAfter.get(targets[0].b.id) ?? []).filter((edge) => edge.score >= targets[0].score - 0.1).length > 1;
+    const sources = targets.length === 1 ? (byAfter.get(targets[0].b.id) ?? []).filter((edge) => !usedBefore.has(edge.a.id) && edge.score >= Math.max(.24, targets[0].score - .1)).map((edge) => edge.a) : [a];
+    const merge = targets.length === 1 && sources.length > 1;
     const transformation = targets.length > 1 ? "split" : merge ? "merged" : targets[0].name >= 0.98 ? "unchanged" : targets[0].name >= 0.45 ? "renamed" : "transformed";
-    mappings.push({ beforeUnitIds: [a.id], afterUnitIds: targets.map((edge) => edge.b.id), transformation, confidence: confidence(targets.map((edge) => edge.score), 2), explanation: `Сопоставление по названию и пересечению функций: ${targets.map((edge) => edge.b.name).join(", ")}. Требует проверки сотрудником.`, sourceRefs: [...a.sourceRefs, ...targets.flatMap((edge) => edge.b.sourceRefs)] });
-    usedBefore.add(a.id); targets.forEach((edge) => usedAfter.add(edge.b.id));
+    mappings.push({ beforeUnitIds: sources.map((source) => source.id), afterUnitIds: targets.map((edge) => edge.b.id), transformation, confidence: confidence(targets.map((edge) => edge.score), 2), explanation: `Сопоставление по названию и пересечению функций: ${targets.map((edge) => edge.b.name).join(", ")}. Требует проверки сотрудником.`, sourceRefs: [...sources.flatMap((source) => source.sourceRefs), ...targets.flatMap((edge) => edge.b.sourceRefs)] });
+    sources.forEach((source) => usedBefore.add(source.id)); targets.forEach((edge) => usedAfter.add(edge.b.id));
   }
   for (const a of before.filter((unit) => !usedBefore.has(unit.id))) mappings.push({ beforeUnitIds: [a.id], afterUnitIds: [], transformation: "removed", confidence: 0.7, explanation: "Явного соответствия подразделению после реорганизации не найдено.", sourceRefs: a.sourceRefs });
   for (const b of after.filter((unit) => !usedAfter.has(unit.id))) mappings.push({ beforeUnitIds: [], afterUnitIds: [b.id], transformation: "created", confidence: 0.7, explanation: "Явного соответствия подразделению до реорганизации не найдено.", sourceRefs: b.sourceRefs });
