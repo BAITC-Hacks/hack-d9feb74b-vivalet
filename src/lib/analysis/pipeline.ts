@@ -5,14 +5,20 @@ import { validateFinding } from "./evidence";
 import { extractAi, extractRules } from "./extract";
 import { confidence, cosine, functionSimilarity, mapUnits, similarity } from "./matching";
 
+function russianCount(count: number, one: string, few: string, many: string): string {
+  const lastTwo = count % 100;
+  if (lastTwo >= 11 && lastTwo <= 14) return `${count} ${many}`;
+  const last = count % 10;
+  return `${count} ${last === 1 ? one : last >= 2 && last <= 4 ? few : many}`;
+}
 function resultReport(units: OrganizationalUnit[], findings: Finding[], mappingsCount: number) {
-  const before = units.filter((unit) => unit.side === "before").length;
-  const after = units.filter((unit) => unit.side === "after").length;
+  const before = units.filter((unit) => unit.side === "before" && !unit.isRoot).length;
+  const after = units.filter((unit) => unit.side === "after" && !unit.isRoot).length;
   const lost = findings.filter((finding) => finding.type === "lost_function").length;
   const duplicates = findings.filter((finding) => finding.type === "duplicated_function").length;
   const conflicts = findings.filter((finding) => finding.type === "conflict_of_interest").length;
   return {
-    executiveSummary: `По предоставленным документам выявлено ${before} подразделений до и ${after} после реорганизации. Сформировано ${mappingsCount} сопоставлений.`,
+    executiveSummary: `По предоставленным документам выявлено ${russianCount(before, "подразделение", "подразделения", "подразделений")} до и ${russianCount(after, "подразделение", "подразделения", "подразделений")} после реорганизации. Сформировано ${russianCount(mappingsCount, "сопоставление", "сопоставления", "сопоставлений")}.`,
     structuralChangesSummary: `Анализ показывает изменения в названиях и распределении функций. Подробности и источники приведены в сопоставлениях.`,
     keyRisks: [`Потенциально потерянных функций: ${lost}.`, `Возможных пересечений: ${duplicates}.`, `Потенциальных конфликтов интересов: ${conflicts}.`],
     recommendations: ["Проверить каждую потенциальную потерю по полному комплекту документов.", "Уточнить ответственность за пересекающиеся функции и документировать распределение полномочий."],
@@ -139,8 +145,9 @@ export async function runAnalysis(id: string): Promise<void> {
     const findings = proposed.filter((item) => validateFinding(item, documents));
     const needsReview = proposed.filter((item) => !validateFinding(item, documents));
     await stage("Формирование аналитического заключения");
-    const fallback = resultReport(units, findings, unitMappings.length);
-    const report = mode === "ai" ? await synthesize({ unitMappings: unitMappings.map((item) => ({ transformation: item.transformation, explanation: item.explanation, sourceRefs: item.sourceRefs })), findings: findings.map(({ title, summary, reasoning, beforeRefs, afterRefs }) => ({ title, summary, reasoning, beforeRefs, afterRefs })), counts: fallback }) : fallback;
+    const subdivisionMappings = unitMappings.filter((mapping) => ![...mapping.beforeUnitIds, ...mapping.afterUnitIds].some((unitId) => units.find((unit) => unit.id === unitId)?.isRoot));
+    const fallback = resultReport(units, findings, subdivisionMappings.length);
+    const report = mode === "ai" ? await synthesize({ unitMappings: subdivisionMappings.map((item) => ({ transformation: item.transformation, explanation: item.explanation, sourceRefs: item.sourceRefs })), findings: findings.map(({ title, summary, reasoning, beforeRefs, afterRefs }) => ({ title, summary, reasoning, beforeRefs, afterRefs })), counts: fallback }) : fallback;
     const result: AnalysisResult = { mode, units, unitMappings, functionMatches: matches, findings, needsReview, report };
     await prisma.analysis.update({ where: { id }, data: { status: "complete", stage: "Готово", result: JSON.stringify(result) } });
   } catch (error) {

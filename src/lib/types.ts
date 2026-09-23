@@ -50,6 +50,7 @@ export interface OrganizationalUnit {
   side: Side;
   name: string;
   normalizedName: string;
+  isRoot?: boolean;
   abbreviation?: string;
   parentUnit?: string;
   leaderRole?: string;
