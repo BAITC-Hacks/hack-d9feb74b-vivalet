@@ -62,7 +62,7 @@ export async function parseDocument(id: string, filename: string, side: Side, bu
       }
     } else {
       const { PDFParse } = await import("pdf-parse");
-      const parser = new PDFParse({ data: new Uint8Array(buffer) });
+      const parser = new PDFParse({ data: new Uint8Array(buffer), verbosity: 0 });
       try {
         const result = await parser.getText();
         const pages = result.pages?.length ? result.pages : [{ num: 1, text: result.text }];

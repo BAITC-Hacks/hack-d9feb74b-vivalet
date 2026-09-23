@@ -10,6 +10,7 @@ export function validateFinding(finding: Finding, documents: ParsedDocument[]): 
   const refs = [...finding.beforeRefs, ...finding.afterRefs];
   if (!refs.length || refs.some((ref) => !validRef(ref, documents))) return false;
   if (finding.type === "lost_function" && !finding.beforeRefs.length) return false;
-  if (["duplicated_function", "conflict_of_interest"].includes(finding.type) && finding.afterRefs.length < 2) return false;
+  if (finding.type === "duplicated_function" && (!finding.beforeRefs.length || !finding.afterRefs.length)) return false;
+  if (finding.type === "conflict_of_interest" && (!finding.beforeRefs.length || !finding.afterRefs.length)) return false;
   return true;
 }

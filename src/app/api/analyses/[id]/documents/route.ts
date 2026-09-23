@@ -1,15 +1,20 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { parseDocument } from "@/lib/documents";
 export const runtime = "nodejs";
+const sideSchema = z.enum(["before", "after"]);
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
     const analysis = await prisma.analysis.findUnique({ where: { id } });
     if (!analysis) return NextResponse.json({ error: "Анализ не найден." }, { status: 404 });
     const form = await request.formData();
-    const side = form.get("side"); const file = form.get("file");
-    if (side !== "before" && side !== "after") return NextResponse.json({ error: "Укажите сторону сравнения." }, { status: 400 });
+    const sideRaw = form.get("side");
+    const sideResult = sideSchema.safeParse(sideRaw);
+    if (!sideResult.success) return NextResponse.json({ error: "Укажите сторону сравнения: before или after." }, { status: 400 });
+    const side = sideResult.data;
+    const file = form.get("file");
     if (!(file instanceof File)) return NextResponse.json({ error: "Файл не найден." }, { status: 400 });
     if (file.size === 0 || file.size > 20 * 1024 * 1024) return NextResponse.json({ error: "Размер файла должен быть от 1 байта до 20 МБ." }, { status: 400 });
     const buffer = Buffer.from(await file.arrayBuffer());

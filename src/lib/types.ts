@@ -41,6 +41,7 @@ export interface FunctionItem {
   normalizedText: string;
   action?: string;
   object?: string;
+  category?: "execution" | "oversight" | "approval" | "other";
   sourceRefs: SourceReference[];
 }
 export interface OrganizationalUnit {
@@ -49,6 +50,7 @@ export interface OrganizationalUnit {
   side: Side;
   name: string;
   normalizedName: string;
+  abbreviation?: string;
   parentUnit?: string;
   leaderRole?: string;
   roles: string[];

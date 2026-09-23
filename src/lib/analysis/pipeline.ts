@@ -20,13 +20,8 @@ function resultReport(units: OrganizationalUnit[], findings: Finding[], mappings
   };
 }
 function finding(type: Finding["type"], title: string, summary: string, reasoning: string, before: FunctionItem | undefined, after: FunctionItem | undefined, beforeUnit?: string, afterUnit?: string, score = 0.7): Finding {
-  return { id: crypto.randomUUID(), type, severity: type === "lost_function" || type === "conflict_of_interest" ? "high" : type === "duplicated_function" ? "medium" : "low", title, summary, reasoning, confidence: score, beforeRefs: before?.sourceRefs ?? [], afterRefs: after?.sourceRefs ?? [], beforeUnit, afterUnit, recommendation: "Проверить вывод по указанным источникам и уточнить распределение ответственности." };
-}
-function actionGroup(text: string): "execution" | "oversight" | "approval" | "other" {
-  if (/(контрол|провер|аудит|оцен|монитор|надзор)/i.test(text)) return "oversight";
-  if (/(утвержд|согласов|принимает решение)/i.test(text)) return "approval";
-  if (/(разрабатыв|осуществл|исполн|провод|организ|выполн)/i.test(text)) return "execution";
-  return "other";
+  const severity = type === "lost_function" || type === "conflict_of_interest" ? "high" as const : type === "duplicated_function" ? "medium" as const : "low" as const;
+  return { id: crypto.randomUUID(), type, severity, title, summary, reasoning, confidence: score, beforeRefs: before?.sourceRefs ?? [], afterRefs: after?.sourceRefs ?? [], beforeUnit, afterUnit, recommendation: "Проверить вывод по указанным источникам и уточнить распределение ответственности." };
 }
 export async function runAnalysis(id: string): Promise<void> {
   const stage = async (name: string, reset = false) => prisma.analysis.update({ where: { id }, data: { status: "running", stage: name, error: null, ...(reset ? { result: null } : {}) } });
@@ -52,7 +47,7 @@ export async function runAnalysis(id: string): Promise<void> {
     const afterItems = afterUnits.flatMap((unit) => unit.functions.map((fn) => ({ fn, unit })));
     const beforeVectors = mode === "ai" ? await embed(beforeItems.map(({ fn }) => fn.normalizedText)) : [];
     const afterVectors = mode === "ai" ? await embed(afterItems.map(({ fn }) => fn.normalizedText)) : [];
-    const candidateRows = beforeItems.map((item, index) => afterItems.map((other, j) => ({ other, lexical: functionSimilarity(item.fn, other.fn), semantic: beforeVectors[index] && afterVectors[j] ? cosine(beforeVectors[index], afterVectors[j]) : 0 })).sort((a, b) => (b.lexical * 0.5 + b.semantic * 0.5) - (a.lexical * 0.5 + a.semantic * 0.5)).slice(0, 2));
+    const candidateRows = beforeItems.map((item, index) => afterItems.map((other, j) => ({ other, lexical: functionSimilarity(item.fn, other.fn), semantic: beforeVectors[index] && afterVectors[j] ? cosine(beforeVectors[index], afterVectors[j]) : 0 })).sort((a, b) => (b.lexical * 0.5 + b.semantic * 0.5) - (a.lexical * 0.5 + a.semantic * 0.5)).slice(0, 5));
     const decisions = new Map<string, VerificationDecision>();
     if (mode === "ai") {
       const cases: VerificationCase[] = beforeItems.flatMap((item, index) => {
@@ -112,16 +107,33 @@ export async function runAnalysis(id: string): Promise<void> {
       if (match.status === "moved" && b && a) proposed.push(finding("moved_function", "Возможное перемещение функции", b.originalText, match.reasoning, b, a, match.beforeUnit, match.afterUnit, match.confidence));
       if (match.status === "modified" && b && a) proposed.push(finding("modified_function", "Изменение функции", b.originalText, match.reasoning, b, a, match.beforeUnit, match.afterUnit, match.confidence));
     }
+    // structural_change findings from unit mappings
+    const structuralLabels: Record<string, string> = { renamed: "Переименование", transformed: "Преобразование", split: "Разделение", merged: "Объединение", removed: "Ликвидация", created: "Создание" };
+    for (const mapping of unitMappings) {
+      if (mapping.transformation === "unchanged") continue;
+      const bUnits = units.filter((u) => mapping.beforeUnitIds.includes(u.id));
+      const aUnits = units.filter((u) => mapping.afterUnitIds.includes(u.id));
+      const beforeName = bUnits.map((u) => u.name).join(", ") || "—";
+      const afterName = aUnits.map((u) => u.name).join(", ") || "—";
+      const severity = mapping.transformation === "removed" ? "high" as const : ["split", "merged", "created"].includes(mapping.transformation) ? "medium" as const : "low" as const;
+      proposed.push({ id: crypto.randomUUID(), type: "structural_change", severity, title: `${structuralLabels[mapping.transformation] ?? mapping.transformation}: ${beforeName !== "—" ? beforeName : afterName}`, summary: mapping.explanation, reasoning: mapping.transformation === "removed" ? `Подразделение «${beforeName}» отсутствует в документах после реорганизации.` : mapping.transformation === "created" ? `Подразделение «${afterName}» отсутствует в документах до реорганизации.` : `${beforeName} → ${afterName}`, confidence: mapping.confidence, beforeRefs: bUnits.flatMap((u) => u.sourceRefs), afterRefs: aUnits.flatMap((u) => u.sourceRefs), beforeUnit: beforeName !== "—" ? beforeName : undefined, afterUnit: afterName !== "—" ? afterName : undefined, recommendation: "Проверить полноту документов и подтвердить реорганизацию ответственным сотрудником." });
+    }
+    // duplicated_function: left.fn in before slot, right.fn in after slot (so UI shows two distinct sources)
     for (let i = 0; i < afterItems.length; i++) for (let j = i + 1; j < afterItems.length; j++) {
       const left = afterItems[i]; const right = afterItems[j];
       const lexical = functionSimilarity(left.fn, right.fn);
       if (left.unit.id !== right.unit.id && lexical >= 0.72 && left.fn.action === right.fn.action) {
-        const duplicate = finding("duplicated_function", "Возможное дублирование функций", `${left.fn.originalText} / ${right.fn.originalText}`, "Похожие действия и объекты закреплены за разными подразделениями. Это не подтверждает нарушение и требует проверки.", undefined, left.fn, undefined, `${left.unit.name}; ${right.unit.name}`, confidence([lexical], 2));
-        duplicate.afterRefs.push(...right.fn.sourceRefs); proposed.push(duplicate);
+        proposed.push(finding("duplicated_function", "Возможное дублирование функций", `${left.fn.originalText} / ${right.fn.originalText}`, `Похожие действия закреплены за «${left.unit.name}» и «${right.unit.name}». Требует проверки.`, left.fn, right.fn, left.unit.name, right.unit.name, confidence([lexical], 2)));
       }
-      if (left.unit.id === right.unit.id && actionGroup(left.fn.action ?? "") !== actionGroup(right.fn.action ?? "") && [actionGroup(left.fn.action ?? ""), actionGroup(right.fn.action ?? "")].includes("oversight") && similarity(left.fn.object ?? "", right.fn.object ?? "") >= 0.3) {
-        const conflict = finding("conflict_of_interest", "Потенциальный конфликт интересов", `${left.fn.originalText} / ${right.fn.originalText}`, "Одно подразделение, возможно, выполняет и проверяет связанную деятельность. Нужна проверка независимости.", undefined, left.fn, undefined, left.unit.name, confidence([lexical], 2));
-        conflict.afterRefs.push(...right.fn.sourceRefs); proposed.push(conflict);
+      if (left.unit.id === right.unit.id && left.fn.category !== right.fn.category && [left.fn.category, right.fn.category].includes("oversight") && similarity(left.fn.object ?? "", right.fn.object ?? "") >= 0.3) {
+        proposed.push(finding("conflict_of_interest", "Потенциальный конфликт интересов", `${left.fn.originalText} / ${right.fn.originalText}`, `Одно подразделение «${left.unit.name}» возможно выполняет и проверяет связанную деятельность. Нужна проверка независимости.`, left.fn, right.fn, left.unit.name, right.unit.name, confidence([lexical], 2)));
+      }
+    }
+    // new_function findings
+    for (const match of matches) {
+      if (match.status === "new" && match.afterId && match.afterRefs.length) {
+        const a = afterItems.find(({ fn }) => fn.id === match.afterId)?.fn;
+        if (a) proposed.push(finding("new_function", "Новая функция", a.originalText, "Явного соответствия до реорганизации не найдено. Функция отсутствовала или была перемещена из другого подразделения.", undefined, a, undefined, match.afterUnit, match.confidence));
       }
     }
     const findings = proposed.filter((item) => validateFinding(item, documents));

@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { extractionPrompt, reportPrompt, verificationPrompt } from "./prompts";
+import { assistantPrompt, extractionPrompt, reportPrompt, verificationPrompt } from "./prompts";
 
 const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 20_000, maxRetries: 0 }) : null;
 export const aiEnabled = () => !!client;
@@ -48,4 +48,16 @@ export async function embed(texts: string[]): Promise<number[][]> {
 export async function synthesize(payload: unknown): Promise<{ executiveSummary: string; structuralChangesSummary: string; keyRisks: string[]; recommendations: string[]; conclusion: string }> {
   const schema = { type: "object", additionalProperties: false, required: ["executiveSummary", "structuralChangesSummary", "keyRisks", "recommendations", "conclusion"], properties: { executiveSummary: { type: "string" }, structuralChangesSummary: { type: "string" }, keyRisks: { type: "array", items: { type: "string" } }, recommendations: { type: "array", items: { type: "string" } }, conclusion: { type: "string" } } };
   return structured("analysis_report", reportPrompt, payload, schema);
+}
+export async function askAssistant(question: string, context: string): Promise<string> {
+  if (!client) throw new Error("OPENAI_API_KEY не задан.");
+  const response = await withRetry(() => client!.responses.create({
+    model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+    stream: false,
+    input: [
+      { role: "system", content: assistantPrompt },
+      { role: "user", content: `Контекст анализа:\n${context}\n\nВопрос: ${question}` },
+    ],
+  }));
+  return response.output_text || "Нет ответа.";
 }

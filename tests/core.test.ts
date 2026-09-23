@@ -36,4 +36,35 @@ describe("matching and evidence", () => {
     const finding: Finding = { id: "x", type: "lost_function", severity: "high", title: "x", summary: "x", reasoning: "x", confidence: 0.7, beforeRefs: [], afterRefs: [] };
     expect(validateFinding(finding, [])).toBe(false);
   });
+  it("validates new_function with after evidence", () => {
+    const doc: ParsedDocument = { id: "d2", filename: "after.docx", side: "after", type: "docx", size: 50, text: "", chunks: [{ id: "c1", documentId: "d2", text: "Осуществляет аудит кибербезопасности" }] };
+    const ref = sourceRef(doc, doc.chunks[0], "Осуществляет аудит кибербезопасности");
+    const finding: Finding = { id: "nf1", type: "new_function", severity: "info", title: "Новая функция", summary: "Аудит ИБ", reasoning: "Отсутствовала ранее", confidence: 0.75, beforeRefs: [], afterRefs: [ref] };
+    expect(validateFinding(finding, [doc])).toBe(true);
+  });
+  it("requires both before and after evidence for duplicated_function and conflict_of_interest", () => {
+    const doc1: ParsedDocument = { id: "d1", filename: "doc.docx", side: "after", type: "docx", size: 50, text: "", chunks: [{ id: "c1", documentId: "d1", text: "Контроль и аудит систем" }, { id: "c2", documentId: "d1", text: "Разработка и внедрение систем" }] };
+    const ref1 = sourceRef(doc1, doc1.chunks[0], "Контроль и аудит систем");
+    const ref2 = sourceRef(doc1, doc1.chunks[1], "Разработка и внедрение систем");
+    const dupValid: Finding = { id: "dup1", type: "duplicated_function", severity: "medium", title: "Дублирование", summary: "Дублирование", reasoning: "Причина", confidence: 0.8, beforeRefs: [ref1], afterRefs: [ref2] };
+    expect(validateFinding(dupValid, [doc1])).toBe(true);
+    const dupInvalid: Finding = { ...dupValid, afterRefs: [] };
+    expect(validateFinding(dupInvalid, [doc1])).toBe(false);
+  });
+  it("identifies unit removal and creation in mapUnits", () => {
+    const beforeUnit: OrganizationalUnit = { id: "b1", documentId: "d1", side: "before", name: "Отдел аналитики", normalizedName: normalize("Отдел аналитики"), roles: [], functions: [], sourceRefs: [] };
+    const afterUnit: OrganizationalUnit = { id: "a1", documentId: "d2", side: "after", name: "Служба роботизации", normalizedName: normalize("Служба роботизации"), roles: [], functions: [], sourceRefs: [] };
+    const mappings = mapUnits([beforeUnit], [afterUnit]);
+    const removed = mappings.find((m) => m.transformation === "removed");
+    const created = mappings.find((m) => m.transformation === "created");
+    expect(removed).toBeDefined();
+    expect(created).toBeDefined();
+  });
+  it("utilizes unit abbreviations to enhance matching", () => {
+    const beforeUnit: OrganizationalUnit = { id: "b1", documentId: "d1", side: "before", name: "Управление внутреннего контроля", normalizedName: normalize("Управление внутреннего контроля"), abbreviation: "УВК", roles: [], functions: [], sourceRefs: [] };
+    const afterUnit: OrganizationalUnit = { id: "a1", documentId: "d2", side: "after", name: "Департамент комплаенс и контроля", normalizedName: normalize("Департамент комплаенс и контроля"), abbreviation: "УВК", roles: [], functions: [], sourceRefs: [] };
+    const mappings = mapUnits([beforeUnit], [afterUnit]);
+    expect(mappings.some((m) => m.beforeUnitIds.includes("b1") && m.afterUnitIds.includes("a1"))).toBe(true);
+  });
 });
+

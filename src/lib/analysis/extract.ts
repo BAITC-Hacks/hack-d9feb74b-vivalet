@@ -6,25 +6,37 @@ import { normalize } from "./matching";
 const unitPattern = /(?:блок|департамент|дирекци[яи]|управлени[ея]|отдел|служб[аы]|сектор|центр|комитет|групп[аы])\s+[^.;:,()]{3,100}/i;
 const actionPattern = /(осуществляет|проводит|организует|обеспечивает|контролирует|разрабатывает|утверждает|анализирует|оценивает|координирует|готовит|формирует|ведет|проверяет|выполняет|осуществление|проведение|организация|обеспечение|контроль|разработка|утверждение|анализ|оценка|координация|подготовка|формирование|ведение|проверка|аудит|мониторинг)/i;
 const functionStart = /^(?:\d+(?:\.\d+)*\.|[а-я]\.|[–-])?\s*(?:осуществл|провод|проведен|организ|обеспеч|контрол|контроль|разраб|утвержд|анализ|оцен|координ|подготов|формир|веден|провер|выполн|аудит|монитор|содейств|участие)/i;
+const abbreviationPattern = /\(([А-ЯЁ]{2,8})\)/;
 function cleanName(name: string): string { return name.trim().replace(/[.!?;:,]+$/, "").slice(0, 120); }
+function extractAbbreviation(text: string): string | undefined { return text.match(abbreviationPattern)?.[1]; }
 function findUnitName(text: string): string | undefined {
   const match = text.match(unitPattern)?.[0];
   if (!match) return undefined;
   return cleanName(match.split(/\s+(?:является|осуществляет|обеспечивает|проводит|входит|выполняет|состоит|создается|образуется)\b/i)[0]);
+}
+function classifyAction(action: string | undefined): "execution" | "oversight" | "approval" | "other" {
+  if (!action) return "other";
+  if (/(контрол|провер|аудит|оцен|монитор|надзор|анализ)/i.test(action)) return "oversight";
+  if (/(утвержд|согласов|принимает)/i.test(action)) return "approval";
+  if (/(разрабатыв|осуществл|исполн|провод|организ|выполн|обеспеч|готовит|формир)/i.test(action)) return "execution";
+  return "other";
 }
 function addFunction(unit: OrganizationalUnit, document: ParsedDocument, chunk: DocumentChunk, quote: string): void {
   if (!chunk.text.includes(quote) || quote.length < 15) return;
   if (unit.functions.some((item) => item.sourceRefs.some((ref) => ref.chunkId === chunk.id))) return;
   const normalizedText = normalize(quote);
   const action = quote.match(actionPattern)?.[0]?.toLowerCase();
-  const item: FunctionItem = { id: crypto.randomUUID(), unitId: unit.id, originalText: quote, normalizedText, action, object: action ? normalize(quote.slice(quote.toLowerCase().indexOf(action) + action.length)) : normalizedText, sourceRefs: [sourceRef(document, chunk, quote)] };
+  const category = classifyAction(action);
+  const item: FunctionItem = { id: crypto.randomUUID(), unitId: unit.id, originalText: quote, normalizedText, action, object: action ? normalize(quote.slice(quote.toLowerCase().indexOf(action) + action.length)) : normalizedText, category, sourceRefs: [sourceRef(document, chunk, quote)] };
   unit.functions.push(item);
 }
 export function extractRules(document: ParsedDocument): OrganizationalUnit[] {
   const units = new Map<string, OrganizationalUnit>();
-  const mainChunk = document.chunks.find((chunk) => /блок[а-я]* внутреннего аудита/i.test(chunk.text)) ?? document.chunks[0];
-  const mainName = /блок[а-я]* внутреннего аудита/i.test(mainChunk.text) ? "Блок внутреннего аудита" : document.filename.replace(/\.[^.]+$/, "").replace(/_/g, " ");
-  const main: OrganizationalUnit = { id: crypto.randomUUID(), documentId: document.id, side: document.side, name: mainName, normalizedName: normalize(mainName), roles: [], functions: [], sourceRefs: [sourceRef(document, mainChunk)] };
+  // Detect root unit generically: first chunk that names a recognized unit type, or fall back to filename
+  const rootChunk = document.chunks.find((chunk) => unitPattern.test(chunk.text) && chunk.text.length < 180) ?? document.chunks[0];
+  const rootNameRaw = findUnitName(rootChunk.text) ?? document.filename.replace(/\.[^.]+$/, "").replace(/_/g, " ");
+  const mainName = cleanName(rootNameRaw);
+  const main: OrganizationalUnit = { id: crypto.randomUUID(), documentId: document.id, side: document.side, name: mainName, normalizedName: normalize(mainName), abbreviation: extractAbbreviation(rootChunk.text), roles: [], functions: [], sourceRefs: [sourceRef(document, rootChunk)] };
   units.set(main.normalizedName, main);
   let current: OrganizationalUnit = main;
   for (const chunk of document.chunks) {
@@ -34,7 +46,7 @@ export function extractRules(document: ParsedDocument): OrganizationalUnit[] {
       const key = normalize(name);
       let candidate = units.get(key);
       if (!candidate) {
-        candidate = { id: crypto.randomUUID(), documentId: document.id, side: document.side, name, normalizedName: key, roles: [], functions: [], sourceRefs: [sourceRef(document, chunk)] };
+        candidate = { id: crypto.randomUUID(), documentId: document.id, side: document.side, name, normalizedName: key, abbreviation: extractAbbreviation(chunk.text), roles: [], functions: [], sourceRefs: [sourceRef(document, chunk)] };
         units.set(key, candidate);
       }
       current = candidate;
@@ -63,7 +75,7 @@ export async function extractAi(document: ParsedDocument, onProgress?: (done: nu
       if (!unit) {
         const explicitName = findUnitName(origin.text);
         if (!explicitName || normalize(explicitName) !== key || origin.text.length >= 170) continue;
-        unit = { id: crypto.randomUUID(), documentId: document.id, side: document.side, name: cleanName(item.name), normalizedName: key, roles: [], functions: [], sourceRefs: [sourceRef(document, origin)] };
+        unit = { id: crypto.randomUUID(), documentId: document.id, side: document.side, name: cleanName(item.name), normalizedName: key, abbreviation: extractAbbreviation(origin.text), roles: [], functions: [], sourceRefs: [sourceRef(document, origin)] };
         units.set(key, unit);
       }
       for (const fn of item.functions) {

@@ -33,8 +33,9 @@ export function functionSimilarity(a: FunctionItem, b: FunctionItem): number {
 export function mapUnits(before: OrganizationalUnit[], after: OrganizationalUnit[]): UnitMapping[] {
   const edges = before.flatMap((a) => after.map((b) => {
     const name = similarity(a.name, b.name);
+    const abbrev = (a.abbreviation && b.abbreviation && a.abbreviation === b.abbreviation) ? 1 : 0;
     const overlap = a.functions.length && b.functions.length ? a.functions.reduce((sum, f) => sum + Math.max(0, ...b.functions.map((g) => functionSimilarity(f, g))), 0) / a.functions.length : 0;
-    return { a, b, score: 0.55 * name + 0.45 * overlap, name };
+    return { a, b, score: 0.40 * name + 0.35 * overlap + 0.25 * abbrev, name };
   })).filter((edge) => edge.score >= 0.22).sort((a, b) => b.score - a.score);
   const byBefore = new Map<string, typeof edges>(); const byAfter = new Map<string, typeof edges>();
   for (const edge of edges) {
@@ -43,7 +44,7 @@ export function mapUnits(before: OrganizationalUnit[], after: OrganizationalUnit
   }
   const mappings: UnitMapping[] = []; const usedBefore = new Set<string>(); const usedAfter = new Set<string>();
   for (const a of before) {
-    const candidates = (byBefore.get(a.id) ?? []).filter((edge) => edge.score >= Math.max(0.3, (byBefore.get(a.id)?.[0]?.score ?? 0) - 0.12));
+    const candidates = (byBefore.get(a.id) ?? []).filter((edge) => edge.score >= Math.max(0.24, (byBefore.get(a.id)?.[0]?.score ?? 0) - 0.12));
     if (!candidates.length) continue;
     const eligible = candidates.filter((edge) => !usedAfter.has(edge.b.id));
     if (!eligible.length) continue;
