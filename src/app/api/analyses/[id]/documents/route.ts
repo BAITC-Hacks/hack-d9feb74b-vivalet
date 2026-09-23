@@ -11,6 +11,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const side = form.get("side"); const file = form.get("file");
     if (side !== "before" && side !== "after") return NextResponse.json({ error: "Укажите сторону сравнения." }, { status: 400 });
     if (!(file instanceof File)) return NextResponse.json({ error: "Файл не найден." }, { status: 400 });
+    if (file.size === 0 || file.size > 20 * 1024 * 1024) return NextResponse.json({ error: "Размер файла должен быть от 1 байта до 20 МБ." }, { status: 400 });
     const buffer = Buffer.from(await file.arrayBuffer());
     const documentId = crypto.randomUUID();
     const parsed = await parseDocument(documentId, file.name, side, buffer);

@@ -47,11 +47,18 @@ export async function parseDocument(id: string, filename: string, side: Side, bu
     } else if (ext === "xlsx") {
       const workbook = XLSX.read(buffer, { type: "buffer" });
       for (const sheet of workbook.SheetNames) {
-        const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheet], { header: 1, blankrows: false });
-        rows.forEach((row, index) => {
-          const value = row.map((cell) => String(cell ?? "").trim()).filter(Boolean).join(" | ");
-          if (value) chunks.push(makeChunk(id, value, { sheet, rowStart: index + 1, rowEnd: index + 1, section: extractSection(value) }));
-        });
+        const worksheet = workbook.Sheets[sheet];
+        if (!worksheet["!ref"]) continue;
+        const range = XLSX.utils.decode_range(worksheet["!ref"]);
+        for (let row = range.s.r; row <= range.e.r; row++) {
+          const cells: string[] = [];
+          for (let col = range.s.c; col <= range.e.c; col++) {
+            const cell = worksheet[XLSX.utils.encode_cell({ r: row, c: col })];
+            if (cell?.v !== undefined && cell?.v !== null) cells.push(String(cell.v).trim());
+          }
+          const value = cells.filter(Boolean).join(" | ");
+          if (value) chunks.push(makeChunk(id, value, { sheet, rowStart: row + 1, rowEnd: row + 1, section: extractSection(value) }));
+        }
       }
     } else {
       const { PDFParse } = await import("pdf-parse");

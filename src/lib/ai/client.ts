@@ -1,11 +1,11 @@
 import OpenAI from "openai";
 import { extractionPrompt, reportPrompt, verificationPrompt } from "./prompts";
 
-const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 20_000, maxRetries: 0 }) : null;
 export const aiEnabled = () => !!client;
 async function withRetry<T>(work: () => Promise<T>): Promise<T> {
   let last: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try { return await work(); } catch (error) {
       last = error;
       const status = (error as { status?: number }).status;
@@ -32,9 +32,13 @@ export async function extractWithAi(filename: string, chunks: { id: string; text
   const output = await structured<{ units: ExtractedItem[] }>("organization_extraction", extractionPrompt, { filename, chunks }, schema);
   return output.units;
 }
-export async function verifyPair(before: string, after: string): Promise<{ relation: "same" | "modified" | "unrelated"; reasoning: string }> {
-  const schema = { type: "object", additionalProperties: false, required: ["relation", "reasoning"], properties: { relation: { type: "string", enum: ["same", "modified", "unrelated"] }, reasoning: { type: "string" } } };
-  return structured("function_verification", verificationPrompt, { before, after }, schema);
+export interface VerificationCase { beforeId: string; before: string; candidates: { afterId: string; after: string }[] }
+export interface VerificationDecision { beforeId: string; afterId: string; relation: "same" | "modified" | "unrelated"; reasoning: string }
+export async function verifyBatch(cases: VerificationCase[]): Promise<VerificationDecision[]> {
+  if (!cases.length) return [];
+  const schema = { type: "object", additionalProperties: false, required: ["decisions"], properties: { decisions: { type: "array", items: { type: "object", additionalProperties: false, required: ["beforeId", "afterId", "relation", "reasoning"], properties: { beforeId: { type: "string" }, afterId: { type: "string" }, relation: { type: "string", enum: ["same", "modified", "unrelated"] }, reasoning: { type: "string" } } } } } };
+  const output = await structured<{ decisions: VerificationDecision[] }>("function_verification_batch", verificationPrompt, { cases }, schema);
+  return output.decisions;
 }
 export async function embed(texts: string[]): Promise<number[][]> {
   if (!client || !texts.length) return [];

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { chunkLines, chunkPdfPage, extractSection, sourceRef } from "../src/lib/documents";
+import { chunkLines, chunkPdfPage, extractSection, parseDocument, sourceRef } from "../src/lib/documents";
+import * as XLSX from "xlsx";
 import { confidence, cosine, mapUnits, normalize } from "../src/lib/analysis/matching";
 import { validRef, validateFinding } from "../src/lib/analysis/evidence";
 import type { Finding, OrganizationalUnit, ParsedDocument } from "../src/lib/types";
@@ -16,6 +17,13 @@ describe("source locations", () => {
   it("joins wrapped PDF lines while retaining page", () => {
     const chunks = chunkPdfPage("doc", 3, "2.4.1. проведение аудита\nинформационных систем;\n2.4.2. контроль качества");
     expect(chunks).toHaveLength(2); expect(chunks[0].page).toBe(3); expect(chunks[0].text).toContain("аудита информационных");
+  });
+  it("keeps physical XLSX row numbers after blanks", async () => {
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([["Заголовок"], [], ["3.1. аудит систем"]]), "Лист1");
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    const parsed = await parseDocument("doc", "test.xlsx", "before", buffer);
+    expect(parsed.chunks[1].rowStart).toBe(3);
   });
 });
 describe("matching and evidence", () => {
