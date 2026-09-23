@@ -4,6 +4,7 @@ import { withHierarchy } from "./hierarchy";
 import { sourceRef } from "../documents";
 import type { DocumentChunk, FunctionItem, OrganizationalUnit, ParsedDocument } from "../types";
 import { normalize } from "./matching";
+import { sourceQuote } from "./quote";
 
 const unitPattern = /(?:блок(?:а|у|ом)?|департамент(?:а|у|ом)?|дирекци[яи]|управлени[ея]|отдел(?:а|у)?|служб[аы]|сектор(?:а|у)?|центр(?:а|у)?)\s+[^.;:,()]{3,100}/i;
 const structureLeadPattern = /(?:состоит из следующих структурных подразделений|в состав(?:е)? .{0,90}(?:входят|входили)|структурные подразделения(?:\s+[^:]{0,60})?:)/i;
@@ -86,9 +87,12 @@ export function extractRules(document: ParsedDocument): OrganizationalUnit[] {
   return [...units.values()];
 }
 export function attachExtractedFunctions(document: ParsedDocument, chunks: DocumentChunk[], units: OrganizationalUnit[], functions: ExtractedFunction[]): void {
-  for (const fact of functions) {
+  for (const extracted of functions) {
+    const fact = { ...extracted };
     const chunk = chunks.find((item) => item.id === fact.chunkId);
-    if (!chunk || !fact.quote.trim() || !chunk.text.includes(fact.quote)) throw new Error("Извлеченная функция не подтверждается точной цитатой.");
+    const quote = chunk && sourceQuote(chunk.text, fact.quote);
+    if (!chunk || !quote) throw new Error("Извлеченная функция не подтверждается точной цитатой.");
+    fact.quote = quote;
     const unit = units.find((item) => fact.organizationalUnit && (normalize(item.name) === normalize(fact.organizationalUnit) || item.abbreviation === fact.organizationalUnit)) ?? units[0];
     if (!unit) throw new Error("Не найден организационный контекст функции.");
     const parentRefs = (chunk.parentChunkIds ?? []).flatMap((id) => {
@@ -116,7 +120,30 @@ export async function extractAi(document: ParsedDocument, onProgress?: (done: nu
   if (group.length) groups.push(group);
   for (let index = 0; index < groups.length; index += 3) {
     const wave = groups.slice(index, index + 3);
-    const results = await Promise.all(wave.map((chunks) => extractFunctions({ filename: document.filename, units: units.map(({ name, abbreviation, parentUnit }) => ({ name, abbreviation, parentUnit })), chunks })));
+    const results = await Promise.all(wave.map(async (chunks) => {
+      const payload = { filename: document.filename, units: units.map(({ name, abbreviation, parentUnit }) => ({ name, abbreviation, parentUnit })), chunks };
+      let invalid: string[] = [];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const output = await extractFunctions(attempt === 0 ? payload : {
+          ...payload,
+          validationFeedback: {
+            instruction: "Regenerate the complete extraction for all supplied chunks. Copy each quote verbatim from the text of its chunkId, not parentContext or the unit list. Do not paraphrase or join separate passages.",
+            invalidFacts: invalid,
+          },
+        });
+        invalid = [];
+        for (const [kind, facts] of [["unit", output.units], ["function", output.functions]] as const) {
+          for (const fact of facts) {
+            const chunk = chunks.find((item) => item.id === fact.chunkId);
+            const quote = chunk && sourceQuote(chunk.text, fact.quote);
+            if (quote) fact.quote = quote;
+            else invalid.push(`${kind}: chunkId=${fact.chunkId}`);
+          }
+        }
+        if (!invalid.length) return output;
+      }
+      throw new Error(`Не удалось подтвердить цитаты в документе «${document.filename}» после повторного извлечения (${invalid.join(", ")}). Модель вернула текст, отсутствующий в указанных фрагментах. Повторите анализ.`);
+    }));
     for (const [position, output] of results.entries()) {
       for (const fact of output.units) {
         const chunk = wave[position].find((item) => item.id === fact.chunkId);
