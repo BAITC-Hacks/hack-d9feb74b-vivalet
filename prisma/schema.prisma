@@ -1,0 +1,32 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Analysis {
+  id        String     @id @default(cuid())
+  status    String     @default("draft")
+  stage     String     @default("Ожидание документов")
+  error     String?
+  result    String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  documents Document[]
+}
+
+model Document {
+  id         String   @id @default(cuid())
+  analysisId String
+  analysis   Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  filename   String
+  side       String
+  type       String
+  size       Int
+  text       String
+  chunks     String
+  createdAt  DateTime @default(now())
+}
