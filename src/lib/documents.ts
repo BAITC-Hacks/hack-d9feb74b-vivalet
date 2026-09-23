@@ -1,4 +1,5 @@
 import mammoth from "mammoth";
+import { withHierarchy } from "./analysis/hierarchy";
 import * as XLSX from "xlsx";
 import type { DocumentChunk, DocumentType, ParsedDocument, Side, SourceReference } from "./types";
 
@@ -73,7 +74,7 @@ export async function parseDocument(id: string, filename: string, side: Side, bu
     throw new Error(ext === "pdf" ? "Не удалось извлечь текст из PDF. Проверьте текстовый слой файла." : `Не удалось прочитать ${ext.toUpperCase()}: ${error instanceof Error ? error.message : "неизвестная ошибка"}`);
   }
   if (!chunks.length) throw new Error("В документе не найден текст для анализа.");
-  return { id, filename, side, type: ext, size: buffer.length, text: chunks.map((chunk) => chunk.text).join("\n"), chunks };
+  return { id, filename, side, type: ext, size: buffer.length, text: chunks.map((chunk) => chunk.text).join("\n"), chunks: withHierarchy(chunks) };
 }
 export function sourceRef(document: ParsedDocument, chunk: DocumentChunk, quote = chunk.text): SourceReference {
   return { documentId: document.id, chunkId: chunk.id, filename: document.filename, quote, section: chunk.section, heading: chunk.heading, page: chunk.page, paragraph: chunk.paragraph, sheet: chunk.sheet, row: chunk.rowStart };

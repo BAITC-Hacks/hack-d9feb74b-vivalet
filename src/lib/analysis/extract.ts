@@ -1,4 +1,6 @@
-import { extractWithAi } from "../ai/client";
+import { extractFunctions } from "../ai/client";
+import type { ExtractedFunction } from "../ai/schemas";
+import { withHierarchy } from "./hierarchy";
 import { sourceRef } from "../documents";
 import type { DocumentChunk, FunctionItem, OrganizationalUnit, ParsedDocument } from "../types";
 import { normalize } from "./matching";
@@ -40,7 +42,7 @@ function classifyAction(action: string | undefined): "execution" | "oversight" |
 }
 function addFunction(unit: OrganizationalUnit, document: ParsedDocument, chunk: DocumentChunk, quote: string): void {
   if (!chunk.text.includes(quote) || quote.length < 15) return;
-  if (unit.functions.some((item) => item.sourceRefs.some((ref) => ref.chunkId === chunk.id))) return;
+  if (unit.functions.some((item) => item.originalText === quote && item.sourceRefs.some((ref) => ref.chunkId === chunk.id))) return;
   const normalizedText = normalize(quote);
   const action = quote.match(actionPattern)?.[0]?.toLowerCase();
   const category = classifyAction(action);
@@ -48,6 +50,7 @@ function addFunction(unit: OrganizationalUnit, document: ParsedDocument, chunk: 
   unit.functions.push(item);
 }
 export function extractRules(document: ParsedDocument): OrganizationalUnit[] {
+  document = { ...document, chunks: withHierarchy(document.chunks) };
   const units = new Map<string, OrganizationalUnit>();
   const structure = structuralUnits(document);
   const intro = document.chunks.slice(0, Math.max(1, document.chunks.findIndex((chunk) => structureLeadPattern.test(chunk.text))));
@@ -70,40 +73,76 @@ export function extractRules(document: ParsedDocument): OrganizationalUnit[] {
     if (structure.some((item) => item.chunk.id === chunk.id)) continue;
     if (functionStart.test(chunk.text) && chunk.text.length < 1200) addFunction(current, document, chunk, chunk.text);
   }
+  for (const unit of units.values()) for (const fn of unit.functions) {
+    const chunk = document.chunks.find((item) => item.id === fn.sourceRefs[0].chunkId)!;
+    const context = `${chunk.parentContext ?? ""}\n${fn.originalText}`;
+    fn.semantic = {
+      actor: chunk.sectionActor ?? unit.name, organizationalUnit: unit.name,
+      action: fn.action ?? "", object: fn.object ?? "", target: null, purpose: null,
+      scope: [], conditions: [], recipients: [], domain: null, parentContext: chunk.parentContext ?? "",
+      authorityType: /запрещ|не вправе/i.test(context) ? "prohibition" : /обязан/i.test(context) ? "duty" : /име[ею]т право/i.test(context) ? "right" : /может|могут/i.test(context) ? "optional" : "unknown",
+    };
+  }
   return [...units.values()];
 }
+export function attachExtractedFunctions(document: ParsedDocument, chunks: DocumentChunk[], units: OrganizationalUnit[], functions: ExtractedFunction[]): void {
+  for (const fact of functions) {
+    const chunk = chunks.find((item) => item.id === fact.chunkId);
+    if (!chunk || !fact.quote.trim() || !chunk.text.includes(fact.quote)) throw new Error("Извлеченная функция не подтверждается точной цитатой.");
+    const unit = units.find((item) => fact.organizationalUnit && (normalize(item.name) === normalize(fact.organizationalUnit) || item.abbreviation === fact.organizationalUnit)) ?? units[0];
+    if (!unit) throw new Error("Не найден организационный контекст функции.");
+    const parentRefs = (chunk.parentChunkIds ?? []).flatMap((id) => {
+      const parent = document.chunks.find((item) => item.id === id);
+      return parent ? [sourceRef(document, parent)] : [];
+    });
+    const semantic = { actor: fact.actor, organizationalUnit: fact.organizationalUnit, action: fact.action, object: fact.object, target: fact.target, purpose: fact.purpose, scope: fact.scope, authorityType: fact.authorityType, conditions: fact.conditions, recipients: fact.recipients, domain: fact.domain, parentContext: chunk.parentContext ?? "" };
+    unit.functions.push({ id: crypto.randomUUID(), unitId: unit.id, originalText: fact.quote, normalizedText: normalize([fact.action, fact.object, fact.purpose, ...fact.scope].filter(Boolean).join(" ")), action: fact.action, object: fact.object, category: classifyAction(fact.action), semantic, sourceRefs: [sourceRef(document, chunk, fact.quote), ...parentRefs] });
+    if (fact.actor && !unit.roles.includes(fact.actor)) unit.roles.push(fact.actor);
+  }
+}
+
 export async function extractAi(document: ParsedDocument, onProgress?: (done: number, total: number) => Promise<void>): Promise<OrganizationalUnit[]> {
-  const baseline = extractRules(document);
-  const structural = structuralUnits(document);
-  const structuralChunkIds = new Set(structural.map((item) => item.chunk.id));
-  const knownFunctionChunks = new Set(baseline.flatMap((unit) => unit.functions.flatMap((fn) => fn.sourceRefs.map((ref) => ref.chunkId))));
-  const chunks = document.chunks.filter((chunk) => chunk.text.length > 12 && (structuralChunkIds.has(chunk.id) || (functionStart.test(chunk.text) && !knownFunctionChunks.has(chunk.id))));
-  const units = new Map(baseline.map((unit) => [unit.normalizedName, unit]));
+  document = { ...document, chunks: withHierarchy(document.chunks) };
+  const units = extractRules(document).map((unit) => ({ ...unit, functions: [] as FunctionItem[] }));
+  // Every chunk is processed, including clauses already recognized by rules. Never truncate sources.
   const groups: DocumentChunk[][] = [];
-  for (let index = 0; index < chunks.length; index += 12) groups.push(chunks.slice(index, index + 12));
+  let group: DocumentChunk[] = [];
+  let size = 0;
+  for (const chunk of document.chunks) {
+    const length = chunk.text.length + (chunk.parentContext?.length ?? 0);
+    if (group.length && (size + length > 14000 || group.length >= 12)) { groups.push(group); group = []; size = 0; }
+    group.push(chunk); size += length;
+  }
+  if (group.length) groups.push(group);
   for (let index = 0; index < groups.length; index += 3) {
     const wave = groups.slice(index, index + 3);
-    const results = await Promise.all(wave.map((group) => extractWithAi(document.filename, group.map(({ id, text }) => ({ id, text: text.slice(0, 1200) })))));
-    for (const [position, extracted] of results.entries()) {
-      const group = wave[position];
-      for (const item of extracted) {
-      const origin = group.find((chunk) => chunk.id === item.chunkId);
-      if (!origin || !item.name.trim()) continue;
-      const key = normalize(item.name);
-      let unit = units.get(key);
-      if (!unit) {
-        const explicitName = structural.find(({ chunk }) => chunk.id === origin.id)?.name;
-        if (!explicitName || normalize(explicitName) !== key) continue;
-        unit = { id: crypto.randomUUID(), documentId: document.id, side: document.side, name: cleanName(item.name), normalizedName: key, isRoot: false, parentUnit: baseline[0].name, abbreviation: extractAbbreviation(origin.text), roles: [], functions: [], sourceRefs: [sourceRef(document, origin)] };
-        units.set(key, unit);
+    const results = await Promise.all(wave.map((chunks) => extractFunctions({ filename: document.filename, units: units.map(({ name, abbreviation, parentUnit }) => ({ name, abbreviation, parentUnit })), chunks })));
+    for (const [position, output] of results.entries()) {
+      for (const fact of output.units) {
+        const chunk = wave[position].find((item) => item.id === fact.chunkId);
+        if (!chunk || !fact.quote.trim() || !chunk.text.includes(fact.quote)) throw new Error("Подразделение не подтверждается точной цитатой.");
+        let unit = units.find((item) => item.normalizedName === normalize(fact.name) || (fact.abbreviation && item.abbreviation === fact.abbreviation));
+        if (!unit) {
+          unit = { id: crypto.randomUUID(), documentId: document.id, side: document.side, name: fact.name, normalizedName: normalize(fact.name), isRoot: false, functions: [], roles: [], sourceRefs: [] };
+          units.push(unit);
+        }
+        if (fact.parentUnit) unit.parentUnit = fact.parentUnit;
+        if (fact.leaderRole) unit.leaderRole = fact.leaderRole;
+        if (fact.abbreviation) unit.abbreviation = fact.abbreviation;
+        unit.roles = [...new Set([...unit.roles, ...fact.roles])];
+        unit.sourceRefs.push(sourceRef(document, chunk, fact.quote));
       }
-      for (const fn of item.functions) {
-        const chunk = group.find((candidate) => candidate.id === fn.chunkId);
-        if (chunk) addFunction(unit, document, chunk, fn.quote.trim());
-      }
-      }
+      attachExtractedFunctions(document, wave[position], units, output.functions);
     }
     await onProgress?.(Math.min(index + wave.length, groups.length), groups.length);
   }
-  return [...units.values()];
+  // A unit definition may occur later than its functions or in another extraction batch.
+  const functions = units.flatMap((unit) => unit.functions);
+  for (const unit of units) unit.functions = [];
+  for (const fn of functions) {
+    const owner = units.find((unit) => fn.semantic?.organizationalUnit && (normalize(unit.name) === normalize(fn.semantic.organizationalUnit) || unit.abbreviation === fn.semantic.organizationalUnit)) ?? units[0];
+    fn.unitId = owner.id;
+    owner.functions.push(fn);
+  }
+  return units;
 }
